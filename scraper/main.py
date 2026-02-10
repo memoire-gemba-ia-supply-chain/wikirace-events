@@ -21,7 +21,7 @@ from sources.itra import fetch_itra_events
 from sources.ultrasignup import fetch_ultrasignup_events
 
 # GitHub repository info for public URL
-GITHUB_USERNAME = os.environ.get("GITHUB_USERNAME", "your-username")
+GITHUB_USERNAME = os.environ.get("GITHUB_USERNAME", "memoire-gemba-ia-supply-chain")
 GITHUB_REPO = os.environ.get("GITHUB_REPO", "wikirace-events")
 PUBLIC_JSON_URL = f"https://raw.githubusercontent.com/{GITHUB_USERNAME}/{GITHUB_REPO}/main/events.json"
 
