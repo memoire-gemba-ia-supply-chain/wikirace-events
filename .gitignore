@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+ENV/
+.env
+
+# Xcode / iOS
+build/
+build_release/
+*.xcuserstate
+xcuserdata/
+DerivedData/
+*.ipa
+*.xcarchive/
+*.dSYM/
+
+# macOS
+.DS_Store
+
+# Logs
+*.log
+build_log.txt
+build_output.txt
+
+# Compiled
+*.o
+*.swiftmodule
+*.swiftdoc
+*.swiftsourceinfo
+*.pcm
+*.msgpack
+*.xcactivitylog
+*.sdkstatcache
+
+# Archives
+WikiRaceApp_Archive.zip
