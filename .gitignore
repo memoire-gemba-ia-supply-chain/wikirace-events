@@ -3,6 +3,7 @@ __pycache__/
 *.py[cod]
 *$py.class
 venv/
+.venv/
 ENV/
 .env
 
@@ -23,6 +24,8 @@ DerivedData/
 *.log
 build_log.txt
 build_output.txt
+scraper/summary.json
+scraper/quality_report.json
 
 # Compiled
 *.o

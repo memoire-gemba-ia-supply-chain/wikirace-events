@@ -16,6 +16,10 @@ on:
       - 'scraper/**'
       - '.github/workflows/scrape-events.yml'
 
+concurrency:
+  group: scrape-events-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   scrape:
     runs-on: ubuntu-latest
@@ -48,10 +52,17 @@ jobs:
         env:
           PYTHONUNBUFFERED: 1
 
+      - name: 🛡️ Validate output quality gates
+        run: |
+          cd scraper
+          python validate_output.py --events ../events.json --report quality_report.json
+
       - name: 📊 Show results
         run: |
           echo "📋 Events JSON Summary:"
-          cat events.json | python -c "import sys, json; d=json.load(sys.stdin); print(f'Total events: {d[\"totalEvents\"]}'); print(f'Last updated: {d[\"lastUpdated\"]}')"
+          cat events.json | python -c "import sys, json; d=json.load(sys.stdin); print(f'Total events: {d[\"totalEvents\"]}'); print(f'Last updated: {d[\"lastUpdated\"]}'); print(f'Disciplines: {d.get(\"quality\", {}).get(\"disciplines\", {})}')"
+          echo "📋 Quality report:"
+          cat scraper/quality_report.json
 
       - name: 📤 Commit and push changes
         run: |
@@ -72,6 +83,9 @@ jobs:
       - name: 📁 Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: events-json
-          path: events.json
+          name: events-and-quality
+          path: |
+            events.json
+            scraper/summary.json
+            scraper/quality_report.json
           retention-days: 30

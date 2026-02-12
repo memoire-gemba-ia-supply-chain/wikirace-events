@@ -1,251 +1,196 @@
 """
-Ahotu Calendars scraper
-Scrapes running and trail events from ahotu.com - a comprehensive race calendar
+Ahotu calendar scraper.
+Used as a global source for running, trail, and triathlon events.
 """
-import requests
-from bs4 import BeautifulSoup
+from __future__ import annotations
+
+import re
 from datetime import datetime
 from typing import List
-import re
-import sys
-sys.path.append('..')
+
+import requests
+from bs4 import BeautifulSoup
+
 from models import RaceEvent
+from sources.common import (
+    clean_text,
+    infer_discipline,
+    infer_distance,
+    is_noise_event,
+    is_reasonable_future_date,
+    map_country_code,
+    normalize_registration_status,
+    parse_date_to_iso,
+    parse_price,
+    sanitize_url,
+)
 
 
-AHOTU_BASE_URL = "https://www.ahotu.com"
-
-
-# Comprehensive country code mapping
-COUNTRY_CODES = {
-    "france": "FR", "spain": "ES", "italy": "IT", "germany": "DE",
-    "switzerland": "CH", "austria": "AT", "united kingdom": "GB", "uk": "GB",
-    "usa": "US", "united states": "US", "morocco": "MA", "japan": "JP",
-    "china": "CN", "south africa": "ZA", "australia": "AU", "portugal": "PT",
-    "netherlands": "NL", "belgium": "BE", "nepal": "NP", "mexico": "MX",
-    "canada": "CA", "brazil": "BR", "argentina": "AR", "chile": "CL",
-    "south korea": "KR", "india": "IN", "thailand": "TH", "malaysia": "MY",
-    "singapore": "SG", "indonesia": "ID", "philippines": "PH", "vietnam": "VN",
-    "greece": "GR", "turkey": "TR", "ireland": "IE", "poland": "PL",
-    "czech republic": "CZ", "czechia": "CZ", "hungary": "HU", "romania": "RO",
-    "sweden": "SE", "norway": "NO", "denmark": "DK", "finland": "FI",
-    "new zealand": "NZ", "kenya": "KE", "ethiopia": "ET", "nigeria": "NG",
-    "egypt": "EG", "uae": "AE", "dubai": "AE", "saudi arabia": "SA",
-    "israel": "IL", "russia": "RU", "ukraine": "UA", "croatia": "HR",
-    "slovenia": "SI", "slovakia": "SK", "serbia": "RS", "bulgaria": "BG",
-    "peru": "PE", "colombia": "CO", "ecuador": "EC", "bolivia": "BO",
-    "uruguay": "UY", "paraguay": "PY", "venezuela": "VE", "costa rica": "CR",
-    "panama": "PA", "guatemala": "GT", "puerto rico": "PR", "cuba": "CU",
-    "andorra": "AD", "monaco": "MC", "luxembourg": "LU", "liechtenstein": "LI",
-    "iceland": "IS", "malta": "MT", "cyprus": "CY", "taiwan": "TW",
-    "hong kong": "HK", "macau": "MO",
+BASE_URL = "https://www.ahotu.com"
+CALENDAR_URLS = {
+    "running": f"{BASE_URL}/calendar/running",
+    "marathon": f"{BASE_URL}/calendar/running/marathon",
+    "trail-running": f"{BASE_URL}/calendar/trail-running",
+    "triathlon": f"{BASE_URL}/calendar/triathlon",
 }
 
 
-def get_country_code(country: str) -> str:
-    """Map country name to ISO code"""
-    if not country:
-        return "XX"
-    return COUNTRY_CODES.get(country.lower().strip(), "XX")
-
-
-def parse_ahotu_date(date_str: str) -> str:
-    """Parse Ahotu date format like '15 Mar, 2026 (Sun)' to YYYY-MM-DD"""
-    if not date_str:
-        return None
-    
-    # Clean the string
-    date_str = re.sub(r'\([^)]*\)', '', date_str).strip()  # Remove day in parentheses
-    date_str = re.sub(r'\d+-', '', date_str).strip()  # Remove multi-day ranges like "07-08"
-    
-    formats = [
-        "%d %b, %Y",
-        "%d %B, %Y", 
-        "%d %b %Y",
-        "%d %B %Y",
-        "%b %d, %Y",
-        "%B %d, %Y",
+def _extract_card_details(anchor) -> tuple[str, str, str, str]:
+    """
+    Returns (name, location, date_text, discipline_text).
+    """
+    name = clean_text(anchor.select_one("h3").get_text()) if anchor.select_one("h3") else ""
+    row_texts = [
+        clean_text(span.get_text())
+        for span in anchor.select("span.flex-grow")
+        if clean_text(span.get_text())
     ]
-    
-    for fmt in formats:
-        try:
-            return datetime.strptime(date_str.strip(), fmt).strftime("%Y-%m-%d")
-        except:
-            continue
-    
-    return None
+
+    location = ""
+    date_text = ""
+    discipline = ""
+
+    for row in row_texts:
+        if not location and "," in row and not re.search(r"\d", row):
+            location = row
+        if not date_text and re.search(r"\b20\d{2}\b", row):
+            date_text = row
+        if not discipline and row.lower() in {"running", "trail running", "triathlon"}:
+            discipline = row
+
+    return (name, location, date_text, discipline)
 
 
-def determine_distance(name: str, url: str = "") -> str:
-    """Determine distance category from event name"""
-    name_lower = name.lower()
-    
-    if "ultra" in name_lower or "100" in name_lower or "50" in name_lower:
-        return "Ultra Trail"
-    if "trail" in name_lower:
-        return "Trail"
-    if "half" in name_lower or "semi" in name_lower or "21k" in name_lower:
-        return "Half Marathon"
-    if "marathon" in name_lower or "42k" in name_lower:
-        return "Marathon"
-    if "10k" in name_lower or "10km" in name_lower:
-        return "10km"
-    if "5k" in name_lower or "5km" in name_lower:
-        return "5km"
-    
-    return "Marathon"
+def _extract_price(anchor) -> tuple[float | None, str | None]:
+    price_text = ""
+    for tag in anchor.select("span"):
+        text = clean_text(tag.get_text())
+        if text.lower().startswith("from "):
+            price_text = text
+            break
+    return parse_price(price_text)
 
 
-def fetch_ahotu_events(max_results: int = 100, discipline: str = "running") -> List[RaceEvent]:
-    """
-    Fetch events from Ahotu calendar
-    
-    Args:
-        max_results: Maximum number of events to fetch
-        discipline: "running", "trail-running", or "triathlon"
-    """
-    events = []
-    today = datetime.now()
-    
-    # Map discipline to URL
-    discipline_urls = {
-        "running": "/calendar/running-ede0cd",
-        "trail-running": "/calendar/trail-running",
-        "marathon": "/calendar/marathon",
-    }
-    
-    url_path = discipline_urls.get(discipline, "/calendar/running-ede0cd")
-    url = f"{AHOTU_BASE_URL}{url_path}"
-    
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
-    }
-    
-    print(f"  📡 Fetching from Ahotu ({discipline})...")
-    
+def _to_country_and_city(location: str) -> tuple[str, str]:
+    if not location:
+        return ("", "")
+    parts = [clean_text(p) for p in location.split(",") if clean_text(p)]
+    if len(parts) == 1:
+        return ("", parts[0])
+    city = ", ".join(parts[:-1])
+    country = parts[-1]
+    return (country, city)
+
+
+def fetch_ahotu_events(category: str, max_results: int = 80) -> List[RaceEvent]:
+    url = CALENDAR_URLS.get(category)
+    if not url:
+        raise ValueError(f"Unknown Ahotu category: {category}")
+
+    print(f"  Ahotu[{category}]: fetching {url}")
     try:
-        response = requests.get(url, headers=headers, timeout=30)
+        response = requests.get(
+            url,
+            timeout=30,
+            headers={"User-Agent": "WikiRaceBot/1.0 (+github actions)"},
+        )
         response.raise_for_status()
-        
-        soup = BeautifulSoup(response.text, 'lxml')
-        
-        # Find event links - Ahotu uses /event/ URLs
-        event_links = soup.find_all('a', href=lambda x: x and '/event/' in str(x))
-        
-        seen_urls = set()
-        
-        for link in event_links:
-            if len(events) >= max_results:
-                break
-            
-            try:
-                href = link.get('href', '')
-                
-                # Skip duplicates
-                if href in seen_urls:
-                    continue
-                seen_urls.add(href)
-                
-                # Get text content
-                text = link.get_text(strip=True)
-                if not text or len(text) < 5:
-                    continue
-                
-                # Parse the combined text (format: "RatingMapEvent NameLocation Date")
-                # Extract date pattern
-                date_match = re.search(r'(\d{1,2}\s+\w+,?\s+\d{4})', text)
-                if not date_match:
-                    continue
-                
-                date_str = date_match.group(1)
-                parsed_date = parse_ahotu_date(date_str)
-                
-                if not parsed_date:
-                    continue
-                
-                # Skip past events
-                try:
-                    event_date = datetime.strptime(parsed_date, "%Y-%m-%d")
-                    if event_date < today:
-                        continue
-                except:
-                    continue
-                
-                # Extract event name (before location/date)
-                # Pattern: RatingMap{EventName}{Location}{Date}
-                name_match = re.search(r'(?:Map)?([A-Z][^0-9]+?)(?:[A-Z][a-z]+,\s*[A-Z])', text)
-                if name_match:
-                    name = name_match.group(1).strip()
-                else:
-                    # Fallback: take text before the date
-                    name = text.split(date_str)[0]
-                    # Clean up common prefixes
-                    name = re.sub(r'^[\d.]+Map', '', name)
-                    name = re.sub(r'^Up to \d+% off', '', name)
-                    name = name.strip()
-                
-                if not name or len(name) < 3:
-                    continue
-                
-                # Extract location
-                location_match = re.search(r'([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*),\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)', text)
-                city = ""
-                country = ""
-                if location_match:
-                    city = location_match.group(1)
-                    country = location_match.group(2)
-                
-                # Build full URL
-                full_url = href if href.startswith('http') else f"{AHOTU_BASE_URL}{href}"
-                
-                # Determine discipline type
-                disc_type = "Trail" if "trail" in discipline else "Running"
-                
-                event = RaceEvent(
-                    id=RaceEvent.generate_id(name, parsed_date),
-                    name=name,
-                    date=parsed_date,
-                    city=city,
-                    country=country,
-                    countryCode=get_country_code(country),
-                    discipline=disc_type,
-                    distance=determine_distance(name, full_url),
-                    elevationGain=None,
-                    description=f"{name} - {city}, {country}",
-                    registrationUrl=full_url,
-                    imageUrl=name.lower().replace(" ", "_"),
-                    price=None,
-                    currency=None,
-                    registrationStatus=None,
-                    gpxUrl=None,
-                    websiteUrl=full_url
-                )
-                events.append(event)
-                
-            except Exception as e:
-                continue
-                
-    except Exception as e:
-        print(f"  ❌ Ahotu scraper error: {e}")
-    
-    print(f"  ✅ Ahotu ({discipline}): Fetched {len(events)} events")
+    except Exception as exc:
+        print(f"  Ahotu[{category}] failed: {exc}")
+        return []
+
+    soup = BeautifulSoup(response.text, "lxml")
+    anchors = soup.select('a.ah-link[href*="/event/"]')
+
+    events: List[RaceEvent] = []
+    seen_links: set[str] = set()
+    seen_ids: set[str] = set()
+
+    for anchor in anchors:
+        href = clean_text(anchor.get("href"))
+        if not href:
+            continue
+        link = f"{BASE_URL}{href}" if href.startswith("/") else href
+        link = sanitize_url(link)
+        if not link or link in seen_links:
+            continue
+        seen_links.add(link)
+
+        name, location, date_text, discipline_text = _extract_card_details(anchor)
+        if not name:
+            continue
+
+        event_date = parse_date_to_iso(date_text)
+        if not is_reasonable_future_date(event_date):
+            continue
+
+        country, city = _to_country_and_city(location)
+        if is_noise_event(name=name, distances="", description=discipline_text):
+            continue
+
+        distance = infer_distance(name=name, distances=discipline_text, discipline_hint=category)
+        discipline = infer_discipline(name=name, discipline_hint=discipline_text or category, distance=distance)
+        price, currency = _extract_price(anchor)
+
+        event_id = RaceEvent.generate_id(name=name, date_str=event_date, location_hint=location)
+        if event_id in seen_ids:
+            continue
+        seen_ids.add(event_id)
+
+        description = f"{discipline} event in {city}, {country}".strip(", ")
+
+        event = RaceEvent(
+            id=event_id,
+            name=name,
+            date=event_date,
+            city=city,
+            country=country,
+            countryCode=map_country_code(country),
+            discipline=discipline,
+            distance=distance,
+            elevationGain=None,
+            description=description,
+            registrationUrl=link,
+            imageUrl=name.lower().replace(" ", "_"),
+            price=price,
+            currency=currency,
+            registrationStatus=normalize_registration_status("open"),
+            gpxUrl=None,
+            websiteUrl=link,
+            source=f"Ahotu/{category}",
+            isFallback=False,
+        )
+        events.append(event)
+
+        if len(events) >= max_results:
+            break
+
+    events.sort(key=lambda e: e.date)
+    print(f"  Ahotu[{category}]: kept {len(events)} events")
     return events
 
 
-def fetch_all_ahotu_events(max_per_discipline: int = 50) -> List[RaceEvent]:
-    """Fetch events from multiple Ahotu disciplines"""
-    all_events = []
-    
-    for discipline in ["running", "trail-running", "marathon"]:
-        events = fetch_ahotu_events(max_results=max_per_discipline, discipline=discipline)
-        all_events.extend(events)
-    
-    return all_events
+def fetch_ahotu_marathons(max_results: int = 80) -> List[RaceEvent]:
+    return fetch_ahotu_events(category="marathon", max_results=max_results)
+
+
+def fetch_ahotu_running(max_results: int = 80) -> List[RaceEvent]:
+    return fetch_ahotu_events(category="running", max_results=max_results)
+
+
+def fetch_ahotu_trails(max_results: int = 80) -> List[RaceEvent]:
+    return fetch_ahotu_events(category="trail-running", max_results=max_results)
+
+
+def fetch_ahotu_triathlons(max_results: int = 60) -> List[RaceEvent]:
+    return fetch_ahotu_events(category="triathlon", max_results=max_results)
 
 
 if __name__ == "__main__":
-    events = fetch_ahotu_events(max_results=20, discipline="marathon")
-    print(f"\nTotal events: {len(events)}")
-    for e in events[:10]:
-        print(f"  - {e.name} ({e.date}) - {e.city}, {e.country}")
+    start = datetime.utcnow()
+    for cat in ("marathon", "trail-running", "triathlon"):
+        data = fetch_ahotu_events(category=cat, max_results=10)
+        print(cat, len(data))
+        for item in data[:3]:
+            print(f"  - {item.date} | {item.name} | {item.city}, {item.country}")
+    print("Elapsed:", datetime.utcnow() - start)

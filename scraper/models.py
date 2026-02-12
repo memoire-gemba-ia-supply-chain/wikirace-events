@@ -3,8 +3,7 @@ Event data models for scraping
 """
 from dataclasses import dataclass, asdict
 from typing import Optional
-from datetime import date
-import json
+import re
 
 
 @dataclass
@@ -27,6 +26,8 @@ class RaceEvent:
     registrationStatus: Optional[str]
     gpxUrl: Optional[str]
     websiteUrl: Optional[str]
+    source: Optional[str] = None
+    isFallback: bool = False
     
     def to_dict(self) -> dict:
         """Convert to dictionary, filtering out None values for optional fields"""
@@ -35,9 +36,9 @@ class RaceEvent:
         return d
     
     @staticmethod
-    def generate_id(name: str, date_str: str) -> str:
+    def generate_id(name: str, date_str: str, location_hint: str = "") -> str:
         """Generate a unique ID from name and date"""
-        slug = name.lower().replace(" ", "-").replace("'", "")
-        # Remove special characters
-        slug = "".join(c for c in slug if c.isalnum() or c == "-")
-        return f"{slug}-{date_str}"
+        base = f"{name} {location_hint}".strip().lower()
+        slug = re.sub(r"[^a-z0-9]+", "-", base).strip("-")
+        date_slug = re.sub(r"[^0-9]", "", date_str)
+        return f"{slug}-{date_slug}"
